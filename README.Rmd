@@ -1,0 +1,20 @@
+# MLB Win Prediction
+
+## Features
+
+win
+home_game
+games_played_before_game
+park_id                     (Bayesian only)
+
+ΔOBP
+ΔISO
+* Or ΔwOBA
+
+Δstarter_FIP
+Δstarter_WHIP
+Δstarter_K9
+Δstarter_HR9
+
+Δbullpen_FIP
+Δrest_days
