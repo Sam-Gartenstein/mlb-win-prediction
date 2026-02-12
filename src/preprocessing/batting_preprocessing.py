@@ -40,19 +40,23 @@ def split_batting_home_away(pa_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
     return away_batting, home_batting
 
 
-def aggregate_team_game_batting(pa_df: pd.DataFrame) -> pd.DataFrame:
+def aggregate_team_game_batting(
+    pa_df: pd.DataFrame,
+    team_role: str | None = None,   # "home" or "away"
+) -> pd.DataFrame:
     """
     Aggregate PA-level rows to team-game totals needed for OBP/ISO later.
     Returns one row per (game_id, batting_team).
+
+    If team_role is "home" or "away", also adds a home_team or away_team column
+    (set equal to batting_team), and orders columns so home/away sit right after
+    batting_team.
     """
     df = pa_df.copy()
     df["game_date"] = pd.to_datetime(df["game_date"])
 
-    # Derived totals
     df["H"]  = (df["is_1b"] + df["is_2b"] + df["is_3b"] + df["is_hr"]).astype(int)
     df["TB"] = (1*df["is_1b"] + 2*df["is_2b"] + 3*df["is_3b"] + 4*df["is_hr"]).astype(int)
-
-    # AB excludes BB, HBP, SF, SH (sac bunt), CI
     df["AB"] = (1 - (df["is_bb"] + df["is_hbp"] + df["is_sf"] + df["is_sh"] + df["is_ci"])).clip(lower=0).astype(int)
 
     out = (
@@ -73,6 +77,26 @@ def aggregate_team_game_batting(pa_df: pd.DataFrame) -> pd.DataFrame:
               _3B=("is_3b", "sum"),
           )
     )
+
+    role = team_role.lower().strip() if team_role is not None else None
+    if role == "home":
+        out["home_team"] = out["batting_team"]
+    elif role == "away":
+        out["away_team"] = out["batting_team"]
+    elif role is not None:
+        raise ValueError("team_role must be None, 'home', or 'away'")
+
+    # Reorder columns: put home_team/away_team between batting_team and PA
+    base = ["game_id", "game_date", "batting_team"]
+    mid = []
+    if "home_team" in out.columns:
+        mid.append("home_team")
+    if "away_team" in out.columns:
+        mid.append("away_team")
+
+    remaining = [c for c in out.columns if c not in base + mid]
+    out = out[base + mid + remaining]
+
     return out
 
 
