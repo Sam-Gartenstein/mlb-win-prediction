@@ -281,25 +281,20 @@ def add_rolling_pitching_counts(
     game_id_col: str = "game_id",
     role_col: str = "pitcher_role",
     include_current_game: bool = False,  # False = only prior games in the window
+    starter_tag: str = "starter",
+    bullpen_tag: str = "bullpen",
 ) -> pd.DataFrame:
     """
     Add rolling (time-based) pitching COUNT stats for 3D and 7D windows.
 
-    Auto behavior:
-      - STARTER mode (pitcher-level): if pitcher_col exists AND data appears to be starter-only
-        (pitcher_role == 'starter' anywhere OR starter_* columns exist).
-        Rolls by pitcher_col and creates/uses starter_* base columns.
+    Behavior:
+      - Starter mode: rolls by pitcher_name and outputs columns like roll_3D_starter_IP, ...
+        (Does NOT create starter_* duplicate base columns.)
 
-      - BULLPEN/TEAM mode: otherwise rolls by team_col using generic base columns.
+      - Bullpen/team mode: rolls by pitching_team and outputs columns like roll_3D_bullpen_IP, ...
 
     Rolling stats are SUMS over the window (not ratios).
-    Does NOT compute WHIP/K9/HR9/FIP.
-
-    Output columns include roll_{window}_<stat>, e.g.:
-      roll_3D_starter_K, roll_7D_starter_IP   (starter mode)
-      roll_3D_K, roll_7D_IP                   (team mode)
-
-    include_current_game=False shifts the window by 1 to avoid leakage (recommended for modeling).
+    include_current_game=False shifts by 1 to avoid leakage.
     """
     out = df.copy()
 
@@ -315,50 +310,27 @@ def add_rolling_pitching_counts(
 
     # Detect whether this is starter-style data
     has_pitcher = pitcher_col in out.columns
-    has_starter_prefix = any(col.startswith("starter_") for col in out.columns)
-    has_role_starter = (role_col in out.columns) and (out[role_col].eq("starter").any())
-
-    is_starter_mode = has_pitcher and (has_starter_prefix or has_role_starter)
+    has_role_starter = (role_col in out.columns) and (out[role_col].astype("string").eq("starter").any())
+    is_starter_mode = has_pitcher and has_role_starter
 
     # Stats we want to roll (raw counts only)
-    generic_stats = ["IP", "H", "BB", "HBP", "K", "HR"]
-    starter_stats = [f"starter_{s}" for s in generic_stats]
+    base_stats = ["IP", "H", "BB", "HBP", "K", "HR"]
+    missing_base = [c for c in base_stats if c not in out.columns]
+    if missing_base:
+        raise ValueError(f"Missing required stat columns for rolling: {missing_base}")
+
+    # Coerce base stats numeric
+    for c in base_stats:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
 
     if is_starter_mode:
         group_keys = [pitcher_col]
         sort_cols = [pitcher_col, date_col, game_id_col]
-
-        # If starter_* base columns don't exist but generic do, create them automatically
-        if not has_starter_prefix:
-            # Require generic columns to exist
-            missing_generic = [s for s in generic_stats if s not in out.columns]
-            if missing_generic:
-                raise ValueError(
-                    "Starter mode detected but couldn't find starter_* columns or the full set of "
-                    f"generic columns {generic_stats}. Missing: {missing_generic}"
-                )
-            for s in generic_stats:
-                out[f"starter_{s}"] = pd.to_numeric(out[s], errors="coerce")
-
-        # Roll only the starter_* stats
-        roll_cols = [c for c in starter_stats if c in out.columns]
-
+        tag = starter_tag
     else:
         group_keys = [team_col]
         sort_cols = [team_col, date_col, game_id_col]
-
-        # Roll generic stats (if present)
-        roll_cols = [c for c in generic_stats if c in out.columns]
-
-    if not roll_cols:
-        raise ValueError(
-            "Couldn't find columns to roll. Expected either starter_* columns "
-            "or the generic columns: IP, H, BB, HBP, K, HR."
-        )
-
-    # Coerce roll columns numeric
-    for c in roll_cols:
-        out[c] = pd.to_numeric(out[c], errors="coerce")
+        tag = bullpen_tag
 
     # Sort before rolling
     out = out.sort_values(sort_cols).reset_index(drop=True)
@@ -368,12 +340,17 @@ def add_rolling_pitching_counts(
         g_indexed = g.set_index(date_col)
 
         for w in windows:
-            rolled = g_indexed[roll_cols].rolling(window=w, min_periods=1).sum()
+            rolled = g_indexed[base_stats].rolling(window=w, min_periods=1).sum()
 
             if not include_current_game:
                 rolled = rolled.shift(1)
 
-            rolled = rolled.add_prefix(f"roll_{w}_").reset_index(drop=True)
+            # Name columns exactly how you want:
+            # starters: roll_3D_starter_IP
+            # bullpen:  roll_3D_bullpen_IP
+            rolled.columns = [f"roll_{w}_{tag}_{c}" for c in rolled.columns]
+            rolled = rolled.reset_index(drop=True)
+
             g = pd.concat([g.reset_index(drop=True), rolled], axis=1)
 
         return g
@@ -386,26 +363,22 @@ def add_rate_metrics_from_rolled_counts(
     df: pd.DataFrame,
     windows: tuple[str, ...] = ("3D", "7D"),
     include_hbp_in_whip: bool = True,
-    fip_constant: float | None = None,   # keep None for raw FIP; set value if you want scaled FIP later
+    fip_constant: float | None = None,
+    bullpen_tag: str = "bullpen",
 ) -> pd.DataFrame:
     """
     Add WHIP, K9, HR9, and (raw) FIP using *rolled count columns*.
 
-    Works for:
-      - starter mode: expects roll_{w}_starter_IP/H/BB/HBP/K/HR
-      - bullpen/team mode: expects roll_{w}_IP/H/BB/HBP/K/HR
-
-    Computes metrics from rolled sums (correct), NOT rolling ratios.
-
-    If IP == 0 (or missing), outputs NaN for those metrics.
+    Now supports:
+      - starter: roll_{w}_starter_IP/H/BB/HBP/K/HR -> roll_{w}_starter_WHIP/K9/HR9/FIP
+      - bullpen: roll_{w}_bullpen_IP/H/BB/HBP/K/HR -> roll_{w}_bullpen_WHIP/K9/HR9/FIP
     """
+    import numpy as np
+    import pandas as pd
+
     out = df.copy()
 
     def _compute_for_prefix(prefix: str, label: str) -> None:
-        # prefix examples:
-        #   "roll_3D_starter_" or "roll_3D_"
-        # label examples:
-        #   "roll_3D_starter"  or "roll_3D"
         ip = f"{prefix}IP"
         h  = f"{prefix}H"
         bb = f"{prefix}BB"
@@ -417,21 +390,16 @@ def add_rate_metrics_from_rolled_counts(
         if include_hbp_in_whip:
             needed.append(hbp)
 
-        # If required columns aren't present, skip silently (lets the function work on partial dfs)
         if not all(col in out.columns for col in needed):
             return
 
-        # Ensure numeric
         for col in set([ip, h, bb, hbp, k, hr]):
             if col in out.columns:
                 out[col] = pd.to_numeric(out[col], errors="coerce")
 
         ip_vals = out[ip]
-
-        # Build numerator pieces
         whip_num = out[h] + out[bb] + (out[hbp] if (include_hbp_in_whip and hbp in out.columns) else 0)
 
-        # Safe division (IP==0 -> NaN)
         with np.errstate(divide="ignore", invalid="ignore"):
             out[f"{label}_WHIP"] = np.where(ip_vals > 0, whip_num / ip_vals, np.nan)
             out[f"{label}_K9"]   = np.where(ip_vals > 0, (out[k]  * 9.0) / ip_vals, np.nan)
@@ -444,10 +412,10 @@ def add_rate_metrics_from_rolled_counts(
             out[f"{label}_FIP"] = fip
 
     for w in windows:
-        # Try starter-style first
+        # starter
         _compute_for_prefix(prefix=f"roll_{w}_starter_", label=f"roll_{w}_starter")
-        # Then generic (bullpen/team)
-        _compute_for_prefix(prefix=f"roll_{w}_", label=f"roll_{w}")
+        # bullpen (tagged)
+        _compute_for_prefix(prefix=f"roll_{w}_{bullpen_tag}_", label=f"roll_{w}_{bullpen_tag}")
 
     return out
 
