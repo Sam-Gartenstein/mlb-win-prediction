@@ -570,22 +570,37 @@ def make_pitching_delta_df(
 
     out = df[required_base].copy()
 
+    def _get_col(w: str, role: str, metric: str, side: str) -> str:
+        """
+        Prefer clean naming:
+          roll_{w}_{role}_{metric}_{side}
+
+        Fallback if combine step double-tagged:
+          roll_{w}_{role}_{metric}_{role}_{side}
+        """
+        clean = f"roll_{w}_{role}_{metric}_{side}"
+        if clean in df.columns:
+            return clean
+
+        double = f"roll_{w}_{role}_{metric}_{role}_{side}"
+        if double in df.columns:
+            return double
+
+        raise ValueError(
+            f"Missing expected column(s) for {role} {metric} {w} ({side}). "
+            f"Tried: '{clean}' and '{double}'."
+        )
+
     for w in windows:
         # --- starter deltas ---
         for metric in ("FIP", "WHIP", "K9", "HR9"):
-            home_col = f"roll_{w}_starter_{metric}_home"
-            away_col = f"roll_{w}_starter_{metric}_away"
-            if home_col not in df.columns or away_col not in df.columns:
-                raise ValueError(f"Missing columns for starter {metric} {w}: {home_col}, {away_col}")
-
+            home_col = _get_col(w=w, role="starter", metric=metric, side="home")
+            away_col = _get_col(w=w, role="starter", metric=metric, side="away")
             out[f"Δstarter_{metric}_{w}"] = df[home_col] - df[away_col]
 
         # --- bullpen deltas (FIP only) ---
-        home_col = f"roll_{w}_bullpen_FIP_home"
-        away_col = f"roll_{w}_bullpen_FIP_away"
-        if home_col not in df.columns or away_col not in df.columns:
-            raise ValueError(f"Missing columns for bullpen FIP {w}: {home_col}, {away_col}")
-
+        home_col = _get_col(w=w, role="bullpen", metric="FIP", side="home")
+        away_col = _get_col(w=w, role="bullpen", metric="FIP", side="away")
         out[f"Δbullpen_FIP_{w}"] = df[home_col] - df[away_col]
 
     # Nice ordering
