@@ -429,37 +429,33 @@ def combine_game_level_pitching_rolling_rates(
     date_col: str = "game_date",
     is_home_col: str = "is_home_team",
     pitcher_name_col: str = "pitcher_name",
+    starter_tag: str = "starter",
+    bullpen_tag: str = "bullpen",
 ) -> pd.DataFrame:
     """
     Combine starter + bullpen rolling RATE metrics into ONE row per game_id.
 
-    Output columns (examples):
-      starter_pitcher_name_home, starter_pitcher_name_away
-      roll_7D_starter_K9_home, roll_7D_starter_K9_away
-      roll_7D_bullpen_WHIP_home, roll_7D_bullpen_WHIP_away
-      ... and similarly for 3D and HR9/FIP.
-
     Expects:
-      starter_df contains: roll_{w}_starter_{metric} columns + pitcher_name + is_home_team
-      bullpen_df contains: roll_{w}_{metric} columns + is_home_team
-    """
+      starter_df contains: roll_{w}_{starter_tag}_{metric} + pitcher_name + is_home_team
+      bullpen_df contains: roll_{w}_{bullpen_tag}_{metric} + is_home_team
 
-    # -----------------------
-    # Helpers
-    # -----------------------
-    def _side_label(x: int) -> str:
-        return "home" if int(x) == 1 else "away"
+    Output columns:
+      starter_pitcher_name_home, starter_pitcher_name_away,
+      roll_3D_starter_WHIP_home, ... roll_7D_starter_FIP_away,
+      roll_3D_bullpen_WHIP_home, ... roll_7D_bullpen_FIP_away
+    """
 
     def _require_cols(df: pd.DataFrame, cols: list[str], label: str) -> None:
         missing = [c for c in cols if c not in df.columns]
         if missing:
             raise ValueError(f"{label} is missing columns: {missing}")
 
-    def _make_wide(df: pd.DataFrame, value_cols: list[str], prefix: str, keep_pitcher_name: bool) -> pd.DataFrame:
-        """
-        Turn long (one row per game_id+side) into wide (one row per game_id),
-        suffixing columns with _home/_away.
-        """
+    def _make_wide(
+        df: pd.DataFrame,
+        value_cols: list[str],
+        prefix: str,              # "starter" or "bullpen" (used in the final column names)
+        keep_pitcher_name: bool,  # True for starters only
+    ) -> pd.DataFrame:
         base_cols = [game_id_col, date_col, is_home_col]
         extra_cols = [pitcher_name_col] if keep_pitcher_name else []
         use_cols = base_cols + extra_cols + value_cols
@@ -468,7 +464,7 @@ def combine_game_level_pitching_rolling_rates(
         tmp = df[use_cols].copy()
         tmp[is_home_col] = tmp[is_home_col].astype(int)
 
-        # Guardrail: ensure one row per (game_id, side)
+        # Guardrail: one row per (game_id, side)
         dups = tmp.duplicated([game_id_col, is_home_col]).sum()
         if dups:
             raise ValueError(f"{prefix} df has {dups} duplicates of (game_id, is_home_team).")
@@ -476,33 +472,30 @@ def combine_game_level_pitching_rolling_rates(
         home = tmp[tmp[is_home_col] == 1].drop(columns=[is_home_col])
         away = tmp[tmp[is_home_col] == 0].drop(columns=[is_home_col])
 
-        # Rename pitcher name (starter only)
         if keep_pitcher_name:
             home = home.rename(columns={pitcher_name_col: "starter_pitcher_name_home"})
             away = away.rename(columns={pitcher_name_col: "starter_pitcher_name_away"})
 
-        # Rename metric columns to include prefix + side
+        # Final desired naming is: <value_col>_<prefix>_<side>
+        # Example: roll_7D_bullpen_WHIP_home (prefix="bullpen")
         home = home.rename(columns={c: f"{c}_{prefix}_home" for c in value_cols})
         away = away.rename(columns={c: f"{c}_{prefix}_away" for c in value_cols})
 
-        # Keep date once (prefer home date if both exist)
+        # Keep date once (prefer home)
         if date_col in away.columns:
             away = away.drop(columns=[date_col])
 
-        wide = home.merge(away, on=game_id_col, how="inner")
-        return wide
+        return home.merge(away, on=game_id_col, how="inner")
 
-    # -----------------------
-    # Identify the rolling RATE columns we need
-    # -----------------------
-    starter_rate_cols = [f"roll_{w}_starter_{m}" for w in windows for m in metrics]
-    bullpen_rate_cols = [f"roll_{w}_{m}" for w in windows for m in metrics]
+    # ---- expected rate columns ----
+    starter_rate_cols = [f"roll_{w}_{starter_tag}_{m}" for w in windows for m in metrics]
+    bullpen_rate_cols = [f"roll_{w}_{bullpen_tag}_{m}" for w in windows for m in metrics]
 
-    # Validate required structural columns
+    # ---- validate structural columns ----
     _require_cols(starter_df, [game_id_col, date_col, is_home_col, pitcher_name_col], "starter_df")
     _require_cols(bullpen_df, [game_id_col, date_col, is_home_col], "bullpen_df")
 
-    # Validate that the rate metric columns exist (this assumes you already ran add_rate_metrics_from_rolled_counts)
+    # ---- validate rate columns exist ----
     missing_st = [c for c in starter_rate_cols if c not in starter_df.columns]
     missing_bp = [c for c in bullpen_rate_cols if c not in bullpen_df.columns]
     if missing_st:
@@ -518,63 +511,32 @@ def combine_game_level_pitching_rolling_rates(
             "Did you run add_rate_metrics_from_rolled_counts on the bullpen rolling df?"
         )
 
-    # -----------------------
-    # Build wide starter + wide bullpen
-    # -----------------------
-    starter_wide = _make_wide(
-        df=starter_df,
-        value_cols=starter_rate_cols,
-        prefix="starter",
-        keep_pitcher_name=True
-    )
+    # ---- wide starter + wide bullpen ----
+    starter_wide = _make_wide(starter_df, starter_rate_cols, prefix=starter_tag, keep_pitcher_name=True)
+    bullpen_wide = _make_wide(bullpen_df, bullpen_rate_cols, prefix=bullpen_tag, keep_pitcher_name=False)
 
-    bullpen_wide = _make_wide(
-        df=bullpen_df,
-        value_cols=bullpen_rate_cols,
-        prefix="bullpen",
-        keep_pitcher_name=False
-    )
-
-    # -----------------------
-    # Merge to one row per game_id
-    # -----------------------
+    # ---- merge to one row per game ----
     out = starter_wide.merge(
         bullpen_wide.drop(columns=[date_col]) if date_col in bullpen_wide.columns else bullpen_wide,
         on=game_id_col,
-        how="inner"
+        how="inner",
     )
 
-    # Optional: nicer column names for bullpen (your requested pattern: roll_7D_bullpen_WHIP_home)
-    # Currently they are: roll_7D_WHIP_bullpen_home — we’ll flip that order.
+    # ---- rename cleanup (remove accidental double tags if they ever occur) ----
+    # Example bad: roll_7D_starter_K9_starter_home -> roll_7D_starter_K9_home
     rename_map = {}
     for w in windows:
         for m in metrics:
             for side in ("home", "away"):
-                old = f"roll_{w}_{m}_bullpen_{side}"
-                new = f"roll_{w}_bullpen_{m}_{side}"
-                if old in out.columns:
-                    rename_map[old] = new
-    out = out.rename(columns=rename_map)
+                bad = f"roll_{w}_{starter_tag}_{m}_{starter_tag}_{side}"
+                good = f"roll_{w}_{starter_tag}_{m}_{side}"
+                if bad in out.columns:
+                    rename_map[bad] = good
+    if rename_map:
+        out = out.rename(columns=rename_map)
 
-    # And for starters, keep as: roll_7D_starter_K9_home (already correct)
-    # They are currently: roll_7D_starter_K9_starter_home — fix that too.
-    rename_map = {}
-    for w in windows:
-        for m in metrics:
-            for side in ("home", "away"):
-                old = f"roll_{w}_starter_{m}_starter_{side}"
-                new = f"roll_{w}_starter_{m}_{side}"
-                if old in out.columns:
-                    rename_map[old] = new
-    out = out.rename(columns=rename_map)
-
-    # Final sort
-    if date_col in out.columns:
-        out = out.sort_values([date_col, game_id_col]).reset_index(drop=True)
-    else:
-        out = out.sort_values([game_id_col]).reset_index(drop=True)
-
-    # Guardrail: one row per game_id
+    # ---- final sort + guardrail ----
+    out = out.sort_values([date_col, game_id_col]).reset_index(drop=True)
     if out.duplicated([game_id_col]).any():
         raise ValueError("Output is not unique by game_id (unexpected).")
 
