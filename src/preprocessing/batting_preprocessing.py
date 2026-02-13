@@ -44,14 +44,17 @@ def add_batting_indicators(
 def aggregate_team_game_batting(pa_df: pd.DataFrame) -> pd.DataFrame:
     """
     Aggregate PA-level rows to team-game totals.
-    Returns one row per (game_id, batting_team), sorted by team and date.
+
+    Returns one row per (game_id, batting_team), with home/away teams carried along.
     """
     df = pa_df.copy()
     df["game_date"] = pd.to_datetime(df["game_date"])
 
+    # Hits / Total bases
     df["H"]  = (df["is_1b"] + df["is_2b"] + df["is_3b"] + df["is_hr"]).astype(int)
     df["TB"] = (1*df["is_1b"] + 2*df["is_2b"] + 3*df["is_3b"] + 4*df["is_hr"]).astype(int)
 
+    # AB = 1 if countable AB else 0
     df["AB"] = (
         1 - (df["is_bb"] + df["is_hbp"] + df["is_sf"] + df["is_sh"] + df["is_ci"])
     ).clip(lower=0).astype(int)
@@ -59,6 +62,11 @@ def aggregate_team_game_batting(pa_df: pd.DataFrame) -> pd.DataFrame:
     out = (
         df.groupby(["game_id", "game_date", "batting_team"], as_index=False)
           .agg(
+              # carry game-level identifiers
+              home_team=("home_team", "first"),
+              away_team=("away_team", "first"),
+
+              # batting totals
               PA=("events", "size"),
               AB=("AB", "sum"),
               H=("H", "sum"),
@@ -75,7 +83,10 @@ def aggregate_team_game_batting(pa_df: pd.DataFrame) -> pd.DataFrame:
           )
     )
 
-    # Sort for readability
+    # Optional but very useful downstream
+    out["is_home_batting"] = (out["batting_team"] == out["home_team"])
+
+    # Sort for rolling computations
     out = out.sort_values(["batting_team", "game_date", "game_id"]).reset_index(drop=True)
 
     return out
@@ -259,25 +270,18 @@ def make_batting_delta_df(
     game_batting_rolls: pd.DataFrame,
     game_id_col: str = "game_id",
     date_col: str = "game_date",
+    home_team_col: str = "home_team",
+    away_team_col: str = "away_team",
     metrics: tuple[str, ...] = ("roll_3D_OBP", "roll_3D_ISO", "roll_7D_OBP", "roll_7D_ISO"),
 ) -> pd.DataFrame:
-    """
-    Create a NEW dataframe with batting deltas (home - away) for selected rolling metrics.
-
-    Expects columns like:
-      <metric>_home, <metric>_away
-
-    Returns columns:
-      game_id, game_date, Δ<metric>
-    """
     df = game_batting_rolls.copy()
 
-    required = [game_id_col, date_col]
+    required = [game_id_col, date_col, home_team_col, away_team_col]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required base columns: {missing}")
 
-    out = df[[game_id_col, date_col]].copy()
+    out = df[[game_id_col, date_col, home_team_col, away_team_col]].copy()
 
     for m in metrics:
         home_col = f"{m}_home"
@@ -288,5 +292,3 @@ def make_batting_delta_df(
         out[f"Δ{m}"] = df[home_col] - df[away_col]
 
     return out
-
-
