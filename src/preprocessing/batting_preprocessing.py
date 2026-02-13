@@ -2,10 +2,13 @@ import numpy as np
 import pandas as pd
 
 
-def add_batting_indicators(pa_df: pd.DataFrame, events_col: str = "events") -> pd.DataFrame:
+def add_batting_indicators(
+    pa_df: pd.DataFrame,
+    events_col: str = "events",
+) -> pd.DataFrame:
     """
-    Add minimal PA-level indicators (keep the PA table light).
-    We'll compute AB/TB/etc. later during aggregation.
+    Add PA-level indicators and create batting_team from inning_topbot.
+    Places batting_team after away_team.
     """
     out = pa_df.copy()
     ev = out[events_col].astype("string")
@@ -23,41 +26,35 @@ def add_batting_indicators(pa_df: pd.DataFrame, events_col: str = "events") -> p
     out["is_3b"] = ev.eq("triple").astype(int)
     out["is_hr"] = ev.eq("home_run").astype(int)
 
+    # Create batting_team
+    topbot = out["inning_topbot"].astype("string").str.lower()
+    out["batting_team"] = out["away_team"]
+    out.loc[topbot == "bot", "batting_team"] = out["home_team"]
+
+    # Move batting_team to sit after away_team
+    cols = list(out.columns)
+    cols.remove("batting_team")
+    insert_at = cols.index("away_team") + 1
+    cols.insert(insert_at, "batting_team")
+    out = out[cols]
+
     return out
 
 
-def split_batting_home_away(pa_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def aggregate_team_game_batting(pa_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Returns (away_batting_df, home_batting_df)
-    Each row is a PA, with a `batting_team` column set.
-    """
-    away_batting = pa_df.loc[pa_df["inning_topbot"].eq("Top")].copy()
-    away_batting["batting_team"] = away_batting["away_team"]
-
-    home_batting = pa_df.loc[pa_df["inning_topbot"].eq("Bot")].copy()
-    home_batting["batting_team"] = home_batting["home_team"]
-
-    return away_batting, home_batting
-
-
-def aggregate_team_game_batting(
-    pa_df: pd.DataFrame,
-    team_role: str | None = None,   # "home" or "away"
-) -> pd.DataFrame:
-    """
-    Aggregate PA-level rows to team-game totals needed for OBP/ISO later.
-    Returns one row per (game_id, batting_team).
-
-    If team_role is "home" or "away", also adds a home_team or away_team column
-    (set equal to batting_team), and orders columns so home/away sit right after
-    batting_team.
+    Aggregate PA-level rows to team-game totals.
+    Returns one row per (game_id, batting_team), sorted by team and date.
     """
     df = pa_df.copy()
     df["game_date"] = pd.to_datetime(df["game_date"])
 
     df["H"]  = (df["is_1b"] + df["is_2b"] + df["is_3b"] + df["is_hr"]).astype(int)
     df["TB"] = (1*df["is_1b"] + 2*df["is_2b"] + 3*df["is_3b"] + 4*df["is_hr"]).astype(int)
-    df["AB"] = (1 - (df["is_bb"] + df["is_hbp"] + df["is_sf"] + df["is_sh"] + df["is_ci"])).clip(lower=0).astype(int)
+
+    df["AB"] = (
+        1 - (df["is_bb"] + df["is_hbp"] + df["is_sf"] + df["is_sh"] + df["is_ci"])
+    ).clip(lower=0).astype(int)
 
     out = (
         df.groupby(["game_id", "game_date", "batting_team"], as_index=False)
@@ -78,24 +75,8 @@ def aggregate_team_game_batting(
           )
     )
 
-    role = team_role.lower().strip() if team_role is not None else None
-    if role == "home":
-        out["home_team"] = out["batting_team"]
-    elif role == "away":
-        out["away_team"] = out["batting_team"]
-    elif role is not None:
-        raise ValueError("team_role must be None, 'home', or 'away'")
-
-    # Reorder columns: put home_team/away_team between batting_team and PA
-    base = ["game_id", "game_date", "batting_team"]
-    mid = []
-    if "home_team" in out.columns:
-        mid.append("home_team")
-    if "away_team" in out.columns:
-        mid.append("away_team")
-
-    remaining = [c for c in out.columns if c not in base + mid]
-    out = out[base + mid + remaining]
+    # Sort for readability
+    out = out.sort_values(["batting_team", "game_date", "game_id"]).reset_index(drop=True)
 
     return out
 
