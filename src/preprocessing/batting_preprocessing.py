@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from typing import Tuple, List
 
 
 def add_batting_indicators(
@@ -8,9 +9,14 @@ def add_batting_indicators(
 ) -> pd.DataFrame:
     """
     Add PA-level indicators and create batting_team from inning_topbot.
+    Drops rows where `events_col` is missing (None/NaN/<NA>).
     Places batting_team after away_team.
     """
     out = pa_df.copy()
+
+    # Drop rows with missing events (None/NaN/<NA>)
+    out = out[out[events_col].notna()].copy()
+
     ev = out[events_col].astype("string")
 
     # Walk / HBP / Sac / Catcher's interference
@@ -292,3 +298,162 @@ def make_batting_delta_df(
         out[f"Δ{m}"] = df[home_col] - df[away_col]
 
     return out
+
+'''
+Move to proper place 
+'''
+def calculate_mean_obp_iso(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute per-team aggregate totals and mean per-game OBP and ISO.
+
+    Intended use:
+        - Generate season-level team summaries
+        - Provide fallback values for early-season imputation
+        - Support validation or reporting of team offensive performance
+
+    Method:
+        - Compute OBP and ISO at the game level
+        - Take simple mean of per-game OBP/ISO
+        - Also return cumulative counting stats
+
+    ISO = (2B + 2*3B + 3*HR) / AB
+    OBP = (H + BB + HBP) / (AB + BB + HBP + SF)
+    """
+    out = df.copy()
+
+    # per-game rates (then averaged)
+    obp_denom = out["AB"] + out["BB"] + out["HBP"] + out["SF"]
+    out["OBP"] = (out["H"] + out["BB"] + out["HBP"]) / obp_denom.replace(0, pd.NA)
+
+    out["ISO"] = (out["_2B"] + (2 * out["_3B"]) + (3 * out["HR"])) / out["AB"].replace(0, pd.NA)
+
+    summary = (
+        out.groupby("batting_team", as_index=False)
+           .agg(
+               games=("game_id", "nunique"),
+               PA=("PA", "sum"),
+               AB=("AB", "sum"),
+               H=("H", "sum"),
+               TB=("TB", "sum"),
+               BB=("BB", "sum"),
+               HBP=("HBP", "sum"),
+               SF=("SF", "sum"),
+               SH=("SH", "sum"),
+               CI=("CI", "sum"),
+               HR=("HR", "sum"),
+               _1B=("_1B", "sum"),
+               _2B=("_2B", "sum"),
+               _3B=("_3B", "sum"),
+               mean_OBP=("OBP", "mean"),
+               mean_ISO=("ISO", "mean"),
+           )
+    )
+
+    return summary
+
+
+'''
+Move to the proper place
+'''
+def fill_missing_rolling_from_prior_year(
+    team_game_df: pd.DataFrame,
+    prior_year_means: pd.DataFrame,
+    rolling_obp_cols: tuple[str, ...] = ("roll_3D_OBP", "roll_7D_OBP"),
+    rolling_iso_cols: tuple[str, ...] = ("roll_3D_ISO", "roll_7D_ISO"),
+    team_col: str = "batting_team",
+) -> pd.DataFrame:
+    df = team_game_df.copy()
+
+    # build maps: team -> mean_OBP / mean_ISO
+    obp_map = prior_year_means.set_index(team_col)["mean_OBP"].to_dict()
+    iso_map = prior_year_means.set_index(team_col)["mean_ISO"].to_dict()
+
+    for c in rolling_obp_cols:
+        if c in df.columns:
+            df[c] = df[c].fillna(df[team_col].map(obp_map))
+
+    for c in rolling_iso_cols:
+        if c in df.columns:
+            df[c] = df[c].fillna(df[team_col].map(iso_map))
+
+    return df
+
+'''
+Move to proper place 
+'''
+def split_home_away_team_game(
+    team_game_batting_df: pd.DataFrame,
+    feat_cols: List[str] | None = None,
+    key_cols: List[str] | None = None,
+    keep_batting_team: bool = True,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Split a long team-game table (2 rows per game: one per batting_team)
+    into home and away DataFrames, with feature columns renamed to *_home / *_away.
+
+    If keep_batting_team=True, each returned df keeps a 'batting_team' column
+    (useful for debugging; redundant with home_team/away_team).
+    """
+    if feat_cols is None:
+        feat_cols = ["roll_3D_OBP", "roll_3D_ISO", "roll_7D_OBP", "roll_7D_ISO"]
+
+    if key_cols is None:
+        key_cols = ["game_id", "game_date", "home_team", "away_team"]
+
+    t = team_game_batting_df.copy()
+    t["game_date"] = pd.to_datetime(t["game_date"])
+
+    required = set(key_cols + ["batting_team"] + feat_cols)
+    missing = sorted(required - set(t.columns))
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    # Columns to carry through split outputs
+    keep_cols = key_cols + (["batting_team"] if keep_batting_team else []) + feat_cols
+
+    home_df = t.loc[t["batting_team"] == t["home_team"], keep_cols].copy()
+    away_df = t.loc[t["batting_team"] == t["away_team"], keep_cols].copy()
+
+    # Rename features only (NOT keys, NOT batting_team)
+    home_df = home_df.rename(columns={c: f"{c}_home" for c in feat_cols})
+    away_df = away_df.rename(columns={c: f"{c}_away" for c in feat_cols})
+
+    return home_df, away_df
+
+'''
+Move to proper place 
+'''
+def combine_home_away_by_game(
+    home_df: pd.DataFrame,
+    away_df: pd.DataFrame,
+    key_cols: List[str] | None = None,
+    how: str = "inner",
+    validate: str = "one_to_one",
+    drop_batting_team_after_merge: bool = False,
+) -> pd.DataFrame:
+    """
+    Recombine home and away DataFrames into one row per game.
+
+    Note: If 'batting_team' exists in both home_df and away_df, the merged output
+    will contain 'batting_team_x' and 'batting_team_y' unless you drop them.
+    """
+    if key_cols is None:
+        key_cols = ["game_id", "game_date", "home_team", "away_team"]
+
+    # Sanity checks: each side should be 1 row per game_id
+    if not home_df["game_id"].is_unique:
+        dupes = home_df.loc[home_df["game_id"].duplicated(), "game_id"].head(10).tolist()
+        raise ValueError(f"home_df has duplicate game_id(s), examples: {dupes}")
+
+    if not away_df["game_id"].is_unique:
+        dupes = away_df.loc[away_df["game_id"].duplicated(), "game_id"].head(10).tolist()
+        raise ValueError(f"away_df has duplicate game_id(s), examples: {dupes}")
+
+    out = home_df.merge(away_df, on=key_cols, how=how, validate=validate)
+
+    if drop_batting_team_after_merge:
+        out = out.drop(columns=[c for c in ["batting_team_x", "batting_team_y"] if c in out.columns])
+
+    out = out.sort_values(["game_date", "game_id"]).reset_index(drop=True)
+    return out
+

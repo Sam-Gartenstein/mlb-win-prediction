@@ -98,13 +98,68 @@ PA_ENDING_EVENTS = {
     "double_play", "grounded_into_double_play", "triple_play",
 }
 
-def filter_plate_appearances(df: pd.DataFrame, events_col: str = "events") -> pd.DataFrame:
+def filter_plate_appearances(
+    df: pd.DataFrame,
+    events_col: str = "events",
+    starter_col: str = "is_starter",
+) -> pd.DataFrame:
     """
-    Keep only PA-ending rows (events in the allowed set), excluding 'truncated_pa'.
+    Keep PA-ending rows (events in PA_ENDING_EVENTS), excluding 'truncated_pa'.
+
+    Starter fallback rule:
+      - If a starter has >=1 PA-ending row in that game/team, keep ONLY PA-ending rows.
+      - If a starter has 0 PA-ending rows in that game/team (i.e., all events are null),
+        keep the last pitch per PA-state for that starter:
+          (game_id, pitching_team, inning, inning_topbot, outs_when_up)
     """
-    ev = df[events_col].astype("string")
-    mask = ev.notna() & ev.isin(PA_ENDING_EVENTS) & ~ev.eq("truncated_pa")
-    return df.loc[mask].copy()
+    out = df.copy()
+    ev = out[events_col].astype("string")
+
+    # Base PA-ending rows
+    pa_end_mask = ev.notna() & ev.isin(PA_ENDING_EVENTS) & ~ev.eq("truncated_pa")
+
+    # If we don't have starter info, just return PA-ending
+    if starter_col not in out.columns:
+        return out.loc[pa_end_mask].copy()
+
+    # ---- Starter fallback: only for starters with ZERO PA-ending rows in their game/team ----
+    starters = out[out[starter_col] == 1].copy()
+    starters_ev = ev.loc[starters.index]
+
+    # For each (game_id, pitching_team), does the starter ever have a PA-ending row?
+    key = ["game_id", "pitching_team"]
+    starters_has_pa_end = (
+        starters.assign(_pa_end=pa_end_mask.loc[starters.index].values)
+                .groupby(key)["_pa_end"].any()
+    )
+    # We want ONLY groups where starter_has_pa_end is False
+    fallback_groups = starters_has_pa_end[~starters_has_pa_end].index  # MultiIndex of (game_id, pitching_team)
+
+    if len(fallback_groups) == 0:
+        return out.loc[pa_end_mask].copy()
+
+    # Subset starter rows for those fallback groups
+    fallback = starters.set_index(key).loc[list(fallback_groups)].reset_index()
+
+    # Define PA-state proxy
+    pa_state_cols = ["game_id", "pitching_team", "inning", "inning_topbot", "outs_when_up"]
+
+    # Keep last pitch_number per PA-state (for these starters only)
+    fallback_last = (
+        fallback.sort_values(pa_state_cols + ["pitch_number"])
+                .groupby(pa_state_cols, as_index=False)
+                .tail(1)
+    )
+
+    # Combine: PA-ending rows for everyone + fallback rows for the rare starters with zero PA-ending events
+    kept = pd.concat([out.loc[pa_end_mask], fallback_last], ignore_index=True)
+
+    # De-dupe in case an overlap occurs
+    kept = kept.drop_duplicates(subset=[
+        "game_id","inning","inning_topbot","pitch_number","pitching_team","pitcher_id","batter_id"
+    ])
+
+    return kept
 
 
 def combine_pitching_batting_deltas(
