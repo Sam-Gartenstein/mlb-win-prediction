@@ -104,16 +104,36 @@ def add_time_rolling_batting_sums(
     date_col: str = "game_date",
     game_id_col: str = "game_id",
     sum_cols: list[str] | None = None,
-    windows: tuple[str, ...] = ("3D", "7D"),
+    windows: tuple[str, ...] = ("3G", "7G"),  # G = games (NOT days)
     min_periods: int = 1,
     prefix: str = "roll_",
     output_order: str = "team",  # "team" or "original"
 ) -> pd.DataFrame:
+    """
+    Add rolling batting SUM features over the last N GAMES (excluding the current game).
 
+    Key behavior:
+    - Rolls within each `team_col` group in chronological order.
+    - Excludes the current game via shift(1) to prevent leakage.
+    - Windows are game-count based:
+        "3G" = prior 3 games
+        "7G" = prior 7 games
+      (If you prefer to keep your old names, you can pass windows=("3D","7D") but they will still mean games.)
+
+    Output columns:
+      {prefix}{window}_{stat}, e.g. roll_3G_AB, roll_7G_HR, ...
+
+    Returns a copy of `team_game_df` with added rolling sum columns.
+    """
     df = team_game_df.copy()
     df["_orig_row"] = np.arange(len(df))
-    df[date_col] = pd.to_datetime(df[date_col])
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
 
+    if df[date_col].isna().any():
+        bad = df.loc[df[date_col].isna(), [date_col] + ([game_id_col] if game_id_col in df.columns else [])].head(5)
+        raise ValueError(f"Found non-parseable {date_col} values. Examples:\n{bad}")
+
+    # Choose default batting sum columns if not provided
     if sum_cols is None:
         default_cols = ["AB", "H", "BB", "HBP", "SF", "HR", "_2B", "_3B", "TB"]
         sum_cols = [c for c in default_cols if c in df.columns]
@@ -122,8 +142,22 @@ def add_time_rolling_batting_sums(
         if missing:
             raise ValueError(f"Requested sum_cols not found: {missing}")
 
+    # Ensure numeric for sums
+    for c in sum_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
     sort_keys = [team_col, date_col] + ([game_id_col] if game_id_col in df.columns else [])
     df = df.sort_values(sort_keys, kind="mergesort")
+
+    def _parse_window_to_n_games(w: str) -> int:
+        w = str(w).strip().upper()
+        if w.endswith("G"):
+            return int(w[:-1])
+        # Backward-compat: allow "3D"/"7D" to mean games if you still pass them
+        if w.endswith("D"):
+            return int(w[:-1])
+        # Or allow raw ints passed as strings
+        return int(w)
 
     def _apply(g: pd.DataFrame) -> pd.DataFrame:
         g = g.sort_values(
@@ -132,14 +166,10 @@ def add_time_rolling_batting_sums(
         ).copy()
 
         shifted = g[sum_cols].shift(1)
-        base = pd.concat([g[[date_col]].reset_index(drop=True), shifted.reset_index(drop=True)], axis=1)
 
         for w in windows:
-            rolled = (
-                base.rolling(window=w, on=date_col, min_periods=min_periods)
-                    .sum(numeric_only=True)
-                    .reindex(columns=sum_cols)
-            )
+            n_games = _parse_window_to_n_games(w)
+            rolled = shifted.rolling(window=n_games, min_periods=min_periods).sum()
             rolled.columns = [f"{prefix}{w}_{c}" for c in sum_cols]
             g[rolled.columns] = rolled.to_numpy()
 
