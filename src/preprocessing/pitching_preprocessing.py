@@ -384,51 +384,67 @@ def aggregate_pitching_game_lines(
 
 def add_rolling_pitching_counts(
     df: pd.DataFrame,
-    windows: tuple[str, ...] = ("3D", "7D"),
+    windows: tuple[str, ...] = ("3D", "7D"),          # accepts ("3D","7D") or ("3G","7G") or ("3","7")
     pitcher_col: str = "pitcher_name",
     team_col: str = "pitching_team",
     date_col: str = "game_date",
     game_id_col: str = "game_id",
     role_col: str = "pitcher_role",
-    include_current_game: bool = False,  # False = only prior games in the window
+    mode: str = "auto",                              # "auto" | "starter" | "bullpen"
+    include_current_game: bool = False,              # False = only prior games in the window
     starter_tag: str = "starter",
     bullpen_tag: str = "bullpen",
     base_stats: tuple[str, ...] = ("IP", "H", "BB", "HBP", "K", "HR"),
+    output_window_suffix: str = "G",                 # always label outputs as games: roll_3G_...
 ) -> pd.DataFrame:
     """
-    Add rolling pitching COUNT stats over the last N games (not calendar days).
+    Add rolling pitching COUNT stats over the last N GAMES (not calendar days).
 
-    IMPORTANT:
-      - windows uses labels like ("3D","7D") for backward-compatibility with your naming,
-        but they are interpreted as N *games* (e.g., "3D" -> last 3 games).
-      - include_current_game=False prevents leakage by excluding the current game
-        from the rolling window (uses a shift(1) before rolling).
+    Key behavior
+    - windows accepts labels like ("3D","7D") for backward-compatibility, BUT is interpreted as N games.
+      Output columns are labeled with games by default (e.g., roll_3G_starter_IP).
+    - include_current_game=False prevents leakage by excluding the current game
+      from the rolling window (uses a shift(1) before rolling).
 
-    Behavior:
-      - Starter mode: grouped by pitcher_name (expects role_col contains "starter")
-        outputs columns like roll_3D_starter_IP, roll_7D_starter_K, ...
+    Mode
+    - mode="starter": filter to rows where role_col == "starter" (if role_col exists),
+      group by pitcher_name, output tag starter_tag
+    - mode="bullpen": filter to rows where role_col == "bullpen" (if role_col exists),
+      group by pitching_team, output tag bullpen_tag
+    - mode="auto": if role_col exists and ANY starter rows exist -> starter grouping,
+      else bullpen grouping (team)
 
-      - Bullpen/team mode: grouped by pitching_team
-        outputs columns like roll_3D_bullpen_IP, roll_7D_bullpen_HR, ...
+    Output columns
+    - starters: roll_{n}{output_window_suffix}_{starter_tag}_{STAT}
+    - bullpen:  roll_{n}{output_window_suffix}_{bullpen_tag}_{STAT}
 
     Rolling stats are SUMS over the last N games in the group.
     """
 
-    def _window_to_n_games(w: str) -> int:
+    def _parse_window_to_n_and_label(w: str) -> tuple[int, str]:
         """
-        Convert a label like '3D' into number of games (3).
-        Accepts '3', '3D', '03D', etc.
+        Convert window label to (n_games, output_label).
+        Accepts: '3D', '3G', '3', '03D', etc.
+        Always outputs '{n}{output_window_suffix}' as the label.
         """
         s = str(w).strip().upper()
-        if s.endswith("D"):
-            s = s[:-1]
+        if s.endswith(("D", "G")):
+            s_num = s[:-1]
+        else:
+            s_num = s
+
         try:
-            n = int(s)
+            n = int(s_num)
         except Exception as e:
-            raise ValueError(f"Invalid window label '{w}'. Expected like '3D' or '7D'.") from e
+            raise ValueError(f"Invalid window label '{w}'. Expected like '3D', '3G', or '3'.") from e
+
         if n <= 0:
             raise ValueError(f"Window must be positive. Got '{w}'.")
-        return n
+
+        return n, f"{n}{output_window_suffix}"
+
+    if mode not in {"auto", "starter", "bullpen"}:
+        raise ValueError('mode must be one of: "auto", "starter", "bullpen"')
 
     out = df.copy()
 
@@ -442,28 +458,49 @@ def add_rolling_pitching_counts(
         bad = out.loc[out[date_col].isna(), [date_col, game_id_col]].head(5)
         raise ValueError(f"Found non-parseable {date_col} values. Examples:\n{bad}")
 
-    # Detect whether this is starter-style data
-    has_pitcher = pitcher_col in out.columns
-    has_role_starter = (role_col in out.columns) and (out[role_col].astype("string").eq("starter").any())
-    is_starter_mode = has_pitcher and has_role_starter
-
     # Validate required stat columns
     missing_base = [c for c in base_stats if c not in out.columns]
     if missing_base:
         raise ValueError(f"Missing required stat columns for rolling: {missing_base}")
 
-    # Coerce base stats numeric (leave NaNs as NaNs; rolling sums will ignore via min_periods and sum behavior)
+    # Coerce base stats numeric
     for c in base_stats:
         out[c] = pd.to_numeric(out[c], errors="coerce")
 
-    if is_starter_mode:
+    # --- decide mode + grouping ---
+    has_pitcher = pitcher_col in out.columns
+    has_role = role_col in out.columns
+
+    if mode == "starter":
+        if not has_pitcher:
+            raise ValueError(f"mode='starter' requires column '{pitcher_col}'")
+        if has_role:
+            out = out.loc[out[role_col].astype("string") == "starter"].copy()
         group_keys = [pitcher_col]
         sort_cols = [pitcher_col, date_col, game_id_col]
         tag = starter_tag
-    else:
+
+    elif mode == "bullpen":
+        if has_role:
+            out = out.loc[out[role_col].astype("string") == "bullpen"].copy()
         group_keys = [team_col]
         sort_cols = [team_col, date_col, game_id_col]
         tag = bullpen_tag
+
+    else:
+        # auto
+        is_starter_mode = False
+        if has_pitcher and has_role:
+            is_starter_mode = out[role_col].astype("string").eq("starter").any()
+
+        if is_starter_mode:
+            group_keys = [pitcher_col]
+            sort_cols = [pitcher_col, date_col, game_id_col]
+            tag = starter_tag
+        else:
+            group_keys = [team_col]
+            sort_cols = [team_col, date_col, game_id_col]
+            tag = bullpen_tag
 
     # Sort before rolling (deterministic)
     out = out.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
@@ -472,6 +509,14 @@ def add_rolling_pitching_counts(
         # Ensure group sorted by time
         g = g.sort_values([date_col, game_id_col], kind="mergesort").reset_index(drop=True).copy()
 
+        # Guardrail: within a group, each (game_date, game_id) should be unique (1 row per game)
+        if g.duplicated([date_col, game_id_col]).any():
+            examples = g.loc[g.duplicated([date_col, game_id_col]), [date_col, game_id_col]].head(5)
+            raise ValueError(
+                "Found duplicate (game_date, game_id) rows within a rolling group; expected one row per game.\n"
+                f"Examples:\n{examples}"
+            )
+
         src = g[list(base_stats)].copy()
 
         # Exclude current game to avoid leakage
@@ -479,12 +524,11 @@ def add_rolling_pitching_counts(
             src = src.shift(1)
 
         for w in windows:
-            n = _window_to_n_games(w)
+            n, out_label = _parse_window_to_n_and_label(w)
 
             rolled = src.rolling(window=n, min_periods=1).sum()
-            rolled.columns = [f"roll_{w}_{tag}_{c}" for c in rolled.columns]
+            rolled.columns = [f"roll_{out_label}_{tag}_{c}" for c in rolled.columns]
 
-            # attach
             g = pd.concat([g, rolled.reset_index(drop=True)], axis=1)
 
         return g
