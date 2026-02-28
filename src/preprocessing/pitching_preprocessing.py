@@ -393,19 +393,43 @@ def add_rolling_pitching_counts(
     include_current_game: bool = False,  # False = only prior games in the window
     starter_tag: str = "starter",
     bullpen_tag: str = "bullpen",
+    base_stats: tuple[str, ...] = ("IP", "H", "BB", "HBP", "K", "HR"),
 ) -> pd.DataFrame:
     """
-    Add rolling (time-based) pitching COUNT stats for 3D and 7D windows.
+    Add rolling pitching COUNT stats over the last N games (not calendar days).
+
+    IMPORTANT:
+      - windows uses labels like ("3D","7D") for backward-compatibility with your naming,
+        but they are interpreted as N *games* (e.g., "3D" -> last 3 games).
+      - include_current_game=False prevents leakage by excluding the current game
+        from the rolling window (uses a shift(1) before rolling).
 
     Behavior:
-      - Starter mode: rolls by pitcher_name and outputs columns like roll_3D_starter_IP, ...
-        (Does NOT create starter_* duplicate base columns.)
+      - Starter mode: grouped by pitcher_name (expects role_col contains "starter")
+        outputs columns like roll_3D_starter_IP, roll_7D_starter_K, ...
 
-      - Bullpen/team mode: rolls by pitching_team and outputs columns like roll_3D_bullpen_IP, ...
+      - Bullpen/team mode: grouped by pitching_team
+        outputs columns like roll_3D_bullpen_IP, roll_7D_bullpen_HR, ...
 
-    Rolling stats are SUMS over the window (not ratios).
-    include_current_game=False shifts by 1 to avoid leakage.
+    Rolling stats are SUMS over the last N games in the group.
     """
+
+    def _window_to_n_games(w: str) -> int:
+        """
+        Convert a label like '3D' into number of games (3).
+        Accepts '3', '3D', '03D', etc.
+        """
+        s = str(w).strip().upper()
+        if s.endswith("D"):
+            s = s[:-1]
+        try:
+            n = int(s)
+        except Exception as e:
+            raise ValueError(f"Invalid window label '{w}'. Expected like '3D' or '7D'.") from e
+        if n <= 0:
+            raise ValueError(f"Window must be positive. Got '{w}'.")
+        return n
+
     out = df.copy()
 
     # --- basic checks ---
@@ -423,13 +447,12 @@ def add_rolling_pitching_counts(
     has_role_starter = (role_col in out.columns) and (out[role_col].astype("string").eq("starter").any())
     is_starter_mode = has_pitcher and has_role_starter
 
-    # Stats we want to roll (raw counts only)
-    base_stats = ["IP", "H", "BB", "HBP", "K", "HR"]
+    # Validate required stat columns
     missing_base = [c for c in base_stats if c not in out.columns]
     if missing_base:
         raise ValueError(f"Missing required stat columns for rolling: {missing_base}")
 
-    # Coerce base stats numeric
+    # Coerce base stats numeric (leave NaNs as NaNs; rolling sums will ignore via min_periods and sum behavior)
     for c in base_stats:
         out[c] = pd.to_numeric(out[c], errors="coerce")
 
@@ -442,30 +465,36 @@ def add_rolling_pitching_counts(
         sort_cols = [team_col, date_col, game_id_col]
         tag = bullpen_tag
 
-    # Sort before rolling
-    out = out.sort_values(sort_cols).reset_index(drop=True)
+    # Sort before rolling (deterministic)
+    out = out.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
 
     def _add_rolls(g: pd.DataFrame) -> pd.DataFrame:
-        g = g.sort_values([date_col, game_id_col]).copy()
-        g_indexed = g.set_index(date_col)
+        # Ensure group sorted by time
+        g = g.sort_values([date_col, game_id_col], kind="mergesort").reset_index(drop=True).copy()
+
+        src = g[list(base_stats)].copy()
+
+        # Exclude current game to avoid leakage
+        if not include_current_game:
+            src = src.shift(1)
 
         for w in windows:
-            rolled = g_indexed[base_stats].rolling(window=w, min_periods=1).sum()
+            n = _window_to_n_games(w)
 
-            if not include_current_game:
-                rolled = rolled.shift(1)
-
-            # Name columns exactly how you want:
-            # starters: roll_3D_starter_IP
-            # bullpen:  roll_3D_bullpen_IP
+            rolled = src.rolling(window=n, min_periods=1).sum()
             rolled.columns = [f"roll_{w}_{tag}_{c}" for c in rolled.columns]
-            rolled = rolled.reset_index(drop=True)
 
-            g = pd.concat([g.reset_index(drop=True), rolled], axis=1)
+            # attach
+            g = pd.concat([g, rolled.reset_index(drop=True)], axis=1)
 
         return g
 
-    out = out.groupby(group_keys, group_keys=False).apply(_add_rolls).reset_index(drop=True)
+    out = (
+        out.groupby(group_keys, group_keys=False, sort=False)
+           .apply(_add_rolls)
+           .reset_index(drop=True)
+    )
+
     return out
 
 
