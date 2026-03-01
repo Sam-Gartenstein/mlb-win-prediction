@@ -972,7 +972,7 @@ def impute_pitching_roll_rates_from_prev_season(
     season_df: pd.DataFrame,
     prev_summary_df: pd.DataFrame,
     kind: str = "starter",  # "starter" or "bullpen"
-    windows: tuple[str, ...] = ("3D", "7D"),
+    windows: tuple[str, ...] = ("3G", "7G"),
     metrics: tuple[str, ...] = ("WHIP", "K9", "HR9", "FIP"),
     pitcher_col: str = "pitcher_name",
     team_col: str = "pitching_team",
