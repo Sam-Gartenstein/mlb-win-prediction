@@ -544,7 +544,7 @@ def add_rolling_pitching_counts(
 
 def add_rate_metrics_from_rolled_counts(
     df: pd.DataFrame,
-    windows: tuple[str, ...] = ("3D", "7D"),
+    windows: tuple[str, ...] = ("3G", "7G"),
     include_hbp_in_whip: bool = True,
     fip_constant: float | None = None,
     bullpen_tag: str = "bullpen",
@@ -979,6 +979,8 @@ def impute_pitching_roll_rates_from_prev_season(
     roll_prefix: str = "roll_",
     starter_tag: str = "starter",
     bullpen_tag: str = "bullpen",
+    create_missing_roll_cols: bool = True,
+    error_if_no_cols: bool = False,
 ) -> pd.DataFrame:
     """
     Impute missing rolling RATE features in season t using season t-1 summary values.
@@ -992,6 +994,11 @@ def impute_pitching_roll_rates_from_prev_season(
       - Expected columns: roll_{w}_bullpen_{metric}
       - Key: pitching_team
       - Fallback: if team not in prev summary -> league mean row (ALL_BULLPEN)
+
+    Notes:
+      - If the expected roll rate columns are not present in season_df:
+          * if create_missing_roll_cols=True, they will be created and then filled.
+          * else, function will return season_df unchanged (unless error_if_no_cols=True).
 
     Returns a copy of season_df with NaNs filled. (No extra indicator columns.)
     """
@@ -1010,9 +1017,9 @@ def impute_pitching_roll_rates_from_prev_season(
         overall_label = "ALL_BULLPEN"
         col_template = f"{roll_prefix}{{w}}_{bullpen_tag}_{{m}}"
 
+    # --- required cols ---
     if group_col not in out.columns:
         raise ValueError(f"season_df missing grouping column '{group_col}'")
-
     if group_col not in prev_summary_df.columns:
         raise ValueError(f"prev_summary_df missing grouping column '{group_col}'")
 
@@ -1020,6 +1027,7 @@ def impute_pitching_roll_rates_from_prev_season(
         if m not in prev_summary_df.columns:
             raise ValueError(f"prev_summary_df missing metric column '{m}'")
 
+    # --- build lookup ---
     prev = prev_summary_df[[group_col, *metrics]].copy()
     prev_map = prev.set_index(group_col)
 
@@ -1035,25 +1043,44 @@ def impute_pitching_roll_rates_from_prev_season(
             v = prev_map.at[entity, metric]
             if pd.notna(v):
                 return float(v)
-
         lv = league_vals.get(metric, np.nan)
         return float(lv) if pd.notna(lv) else np.nan
 
-    roll_cols = []
+    # --- expected roll rate cols ---
+    expected_cols: list[tuple[str, str, str]] = []
     for w in windows:
         for m in metrics:
             c = col_template.format(w=w, m=m)
-            if c in out.columns:
-                roll_cols.append((w, m, c))
+            expected_cols.append((w, m, c))
 
-    if not roll_cols:
-        example = col_template.format(w="3D", m=metrics[0])
-        raise ValueError(
-            f"No matching roll columns found in season_df. Example expected: '{example}'."
-        )
+    existing = [(w, m, c) for (w, m, c) in expected_cols if c in out.columns]
 
+    # If none exist, optionally create them (so pipeline doesn't crash)
+    if not existing:
+        if create_missing_roll_cols:
+            for _, _, c in expected_cols:
+                if c not in out.columns:
+                    out[c] = np.nan
+            roll_cols = expected_cols
+        else:
+            if error_if_no_cols:
+                example = col_template.format(w=windows[0], m=metrics[0])
+                raise ValueError(
+                    f"No matching roll columns found in season_df. Example expected: '{example}'."
+                )
+            return out
+    else:
+        # Fill only the cols that exist, unless we're creating missing ones too
+        if create_missing_roll_cols:
+            for _, _, c in expected_cols:
+                if c not in out.columns:
+                    out[c] = np.nan
+            roll_cols = expected_cols
+        else:
+            roll_cols = existing
+
+    # --- fill NA values using prev season lookup ---
     entities = out[group_col].astype("string").fillna("")
-
     for _, m, c in roll_cols:
         miss = out[c].isna()
         if miss.any():
