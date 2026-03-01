@@ -2,7 +2,7 @@ import pandas as pd
 
 
 ROLL_COMPONENTS = ("IP", "H", "BB", "HBP", "K", "HR")
-WINDOWS = ("3D", "7D")
+WINDOWS = ("3G", "7G")
 ROLES = ("starter", "bullpen")
 
 def drop_rolled_component_cols(
