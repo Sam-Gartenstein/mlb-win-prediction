@@ -191,7 +191,7 @@ def add_time_rolling_batting_sums(
 
 def add_rolling_obp_iso(
     df: pd.DataFrame,
-    windows: tuple[str, ...] = ("3D", "7D"),
+    windows: tuple[str, ...] = ("3G", "7G"),
     prefix: str = "roll_",
     out_prefix: str = "roll_",
 ) -> pd.DataFrame:
@@ -236,7 +236,7 @@ def add_rolling_obp_iso(
 
 def add_rolling_obp_iso_batch(
     dfs: dict[str, pd.DataFrame] | list[pd.DataFrame],
-    windows: tuple[str, ...] = ("3D", "7D"),
+    windows: tuple[str, ...] = ("3G", "7G"),
     prefix: str = "roll_",
     out_prefix: str = "roll_",
 ) -> dict[str, pd.DataFrame] | list[pd.DataFrame]:
@@ -265,7 +265,7 @@ def combine_home_away_batting_rolls(
     away_batting: pd.DataFrame,
     game_id_col: str = "game_id",
     date_col: str = "game_date",
-    metrics: tuple[str, ...] = ("roll_3D_OBP", "roll_3D_ISO", "roll_7D_OBP", "roll_7D_ISO"),
+    metrics: tuple[str, ...] = ("roll_3G_OBP", "roll_3G_ISO", "roll_7G_OBP", "roll_7G_ISO"),
 ) -> pd.DataFrame:
     """
     Combine home + away batting rolling metrics into one row per game_id.
@@ -308,7 +308,7 @@ def make_batting_delta_df(
     date_col: str = "game_date",
     home_team_col: str = "home_team",
     away_team_col: str = "away_team",
-    metrics: tuple[str, ...] = ("roll_3D_OBP", "roll_3D_ISO", "roll_7D_OBP", "roll_7D_ISO"),
+    metrics: tuple[str, ...] = ("roll_3G_OBP", "roll_3G_ISO", "roll_7G_OBP", "roll_7G_ISO"),
 ) -> pd.DataFrame:
     df = game_batting_rolls.copy()
 
@@ -388,8 +388,8 @@ Move to the proper place
 def fill_missing_rolling_from_prior_year(
     team_game_df: pd.DataFrame,
     prior_year_means: pd.DataFrame,
-    rolling_obp_cols: tuple[str, ...] = ("roll_3D_OBP", "roll_7D_OBP"),
-    rolling_iso_cols: tuple[str, ...] = ("roll_3D_ISO", "roll_7D_ISO"),
+    rolling_obp_cols: tuple[str, ...] = ("roll_3G_OBP", "roll_7G_OBP"),
+    rolling_iso_cols: tuple[str, ...] = ("roll_3G_ISO", "roll_7G_ISO"),
     team_col: str = "batting_team",
 ) -> pd.DataFrame:
     df = team_game_df.copy()
@@ -425,7 +425,7 @@ def split_home_away_team_game(
     (useful for debugging; redundant with home_team/away_team).
     """
     if feat_cols is None:
-        feat_cols = ["roll_3D_OBP", "roll_3D_ISO", "roll_7D_OBP", "roll_7D_ISO"]
+        feat_cols = ["roll_3G_OBP", "roll_3G_ISO", "roll_7G_OBP", "roll_7G_ISO"]
 
     if key_cols is None:
         key_cols = ["game_id", "game_date", "home_team", "away_team"]
