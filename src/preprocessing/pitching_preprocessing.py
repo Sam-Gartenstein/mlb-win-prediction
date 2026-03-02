@@ -777,7 +777,7 @@ def combine_game_level_pitching_rolling_rates(
 
 def make_pitching_delta_df(
     game_pitching_rates: pd.DataFrame,
-    windows: tuple[str, ...] = ("3D", "7D"),
+    windows: tuple[str, ...] = ("3G", "7G"),
     game_id_col: str = "game_id",
     date_col: str = "game_date",
     home_team_col: str = "home_team",
@@ -1094,7 +1094,7 @@ Move to correct place later
 def combine_game_level_pitching_rolling_rates(
     starter_df: pd.DataFrame,
     bullpen_df: pd.DataFrame,
-    windows: tuple[str, ...] = ("3D", "7D"),
+    windows: tuple[str, ...] = ("3G", "7G"),
     metrics: tuple[str, ...] = ("WHIP", "K9", "HR9", "FIP"),
     game_id_col: str = "game_id",
     date_col: str = "game_date",
@@ -1231,7 +1231,7 @@ def combine_game_level_pitching_rolling_rates(
 
 def carry_forward_bullpen_rolls_on_full_games(
     df: pd.DataFrame,
-    windows: tuple[str, ...] = ("3D", "7D"),
+    windows: tuple[str, ...] = ("3G", "7G"),
     metrics: tuple[str, ...] = ("WHIP", "K9", "HR9", "FIP"),
     date_col: str = "game_date",
     game_id_col: str = "game_id",
