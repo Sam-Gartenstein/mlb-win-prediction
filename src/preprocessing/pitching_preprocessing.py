@@ -778,6 +778,8 @@ def combine_game_level_pitching_rolling_rates(
 def make_pitching_delta_df(
     game_pitching_rates: pd.DataFrame,
     windows: tuple[str, ...] = ("3G", "7G"),
+    starter_metrics: tuple[str, ...] = ("FIP", "WHIP", "K9", "HR9"),
+    bullpen_metrics: tuple[str, ...] = ("FIP", "WHIP", "K9", "HR9"),
     game_id_col: str = "game_id",
     date_col: str = "game_date",
     home_team_col: str = "home_team",
@@ -786,11 +788,19 @@ def make_pitching_delta_df(
     away_name_col: str = "starter_pitcher_name_away",
 ) -> pd.DataFrame:
     """
-    Create a NEW dataframe with only game identifiers, teams, starter names, and pitching deltas (home - away).
+    Create a NEW dataframe with only game identifiers, teams, starter names,
+    and pitching deltas (home - away).
 
-    Produces columns for each window:
-      Δstarter_FIP_{w}, Δstarter_WHIP_{w}, Δstarter_K9_{w}, Δstarter_HR9_{w}
-      Δbullpen_FIP_{w}
+    Produces columns for each window `w`:
+      Starters: Δstarter_<METRIC>_<w> for metrics in `starter_metrics`
+      Bullpen : Δbullpen_<METRIC>_<w> for metrics in `bullpen_metrics`
+
+    Expected input columns (clean naming):
+      roll_<w>_starter_<METRIC>_home / roll_<w>_starter_<METRIC>_away
+      roll_<w>_bullpen_<METRIC>_home / roll_<w>_bullpen_<METRIC>_away
+
+    Fallback supported if a combine step double-tagged role:
+      roll_<w>_<role>_<METRIC>_<role>_<side>
 
     Does NOT modify the input dataframe.
     """
@@ -827,24 +837,25 @@ def make_pitching_delta_df(
             f"Tried: '{clean}' and '{double}'."
         )
 
+    # Build deltas
     for w in windows:
         # --- starter deltas ---
-        for metric in ("FIP", "WHIP", "K9", "HR9"):
+        for metric in starter_metrics:
             home_col = _get_col(w=w, role="starter", metric=metric, side="home")
             away_col = _get_col(w=w, role="starter", metric=metric, side="away")
             out[f"Δstarter_{metric}_{w}"] = df[home_col] - df[away_col]
 
-        # --- bullpen deltas (FIP only) ---
-        home_col = _get_col(w=w, role="bullpen", metric="FIP", side="home")
-        away_col = _get_col(w=w, role="bullpen", metric="FIP", side="away")
-        out[f"Δbullpen_FIP_{w}"] = df[home_col] - df[away_col]
+        # --- bullpen deltas ---
+        for metric in bullpen_metrics:
+            home_col = _get_col(w=w, role="bullpen", metric=metric, side="home")
+            away_col = _get_col(w=w, role="bullpen", metric=metric, side="away")
+            out[f"Δbullpen_{metric}_{w}"] = df[home_col] - df[away_col]
 
     # Nice ordering
     delta_cols = [c for c in out.columns if c.startswith("Δ")]
     out = out[required_base + delta_cols].copy()
 
     return out
-
 
 '''
 Move to correct place later
