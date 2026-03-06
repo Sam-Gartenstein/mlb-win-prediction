@@ -1,5 +1,7 @@
 # MLB Win Prediction
 
+This project builds a machine learning model to estimate the probability that the home team will win a Major League Baseball game. Using Statcast-derived pitching, batting, and fielding metrics, the model compares recent team performance through rolling statistical windows and constructs matchup-based features that quantify differences between the two teams. Several classification algorithms—including logistic regression, random forests, and gradient boosting—are evaluated to determine which approach best predicts game outcomes. The goal of the project is to explore how recent team performance and matchup dynamics influence win probability in baseball.
+
 ## Internal TODO List
 
 **Game Preprocessing** Notebook and Associated Scripts:
